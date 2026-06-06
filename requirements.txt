@@ -1,0 +1,4 @@
+face_recognition
+tqdm
+Pillow
+pillow-heif
