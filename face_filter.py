@@ -9,19 +9,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-import face_recognition
-import numpy as np
 import pillow_heif
-from PIL import Image
+from deepface import DeepFace
 from tqdm import tqdm
 
 pillow_heif.register_heif_opener()
 
 VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 
-MATCH_THRESHOLD = 0.45
-UNCERTAIN_THRESHOLD = 0.60
-COMPARE_TOLERANCE = 0.5
+MATCH_THRESHOLD_FACTOR = 1.0
+UNCERTAIN_THRESHOLD_FACTOR = 1.4
 
 
 def parse_args():
@@ -51,26 +48,37 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_image_array(image_path):
-    with Image.open(image_path) as pil_image:
-        if pil_image.mode != "RGB":
-            pil_image = pil_image.convert("RGB")
-        return np.array(pil_image)
+def _is_no_face_error(exc):
+    messages = [str(exc)]
+    cause = exc.__cause__
+    if cause is not None:
+        messages.append(str(cause))
+    combined = " ".join(messages).lower()
+    return "face could not be detected" in combined
 
 
-def load_reference_encoding(ref_path):
+def _image_has_face(image_path, deepface_lock):
+    with deepface_lock:
+        DeepFace.extract_faces(
+            img_path=str(image_path),
+            detector_backend="retinaface",
+            enforce_detection=True,
+        )
+
+
+def validate_reference_image(ref_path, deepface_lock):
     ref_path = Path(ref_path)
     if not ref_path.is_file():
         print(f"Error: Reference image not found: {ref_path}")
         raise SystemExit(1)
 
-    image = load_image_array(ref_path)
-    encodings = face_recognition.face_encodings(image)
-    if not encodings:
-        print(f"Error: No face found in reference image: {ref_path}")
-        raise SystemExit(1)
-
-    return encodings[0]
+    try:
+        _image_has_face(ref_path, deepface_lock)
+    except ValueError as exc:
+        if _is_no_face_error(exc):
+            print(f"Error: No face found in reference image: {ref_path}")
+            raise SystemExit(1) from exc
+        raise
 
 
 def collect_images(src_dir):
@@ -90,49 +98,76 @@ def collect_images(src_dir):
 def move_image(image_path, src_root, dest_root):
     relative_path = image_path.relative_to(src_root)
     dest_path = dest_root / relative_path
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(dest_path.parent, exist_ok=True)
     stat = os.stat(image_path)
     shutil.move(str(image_path), str(dest_path))
     os.utime(dest_path, (stat.st_atime, stat.st_mtime))
 
 
-def process_image(image_path, src_root, ref_encoding, out_dir, uncertain_dir, lock, counters, report):
+def process_image(
+    image_path,
+    src_root,
+    ref_path,
+    out_dir,
+    uncertain_dir,
+    lock,
+    deepface_lock,
+    counters,
+    report,
+):
     rel_path = str(image_path.relative_to(src_root))
 
     try:
-        image = load_image_array(image_path)
-        face_locations = face_recognition.face_locations(image)
+        try:
+            _image_has_face(image_path, deepface_lock)
+        except ValueError as exc:
+            if _is_no_face_error(exc):
+                with lock:
+                    counters["no_face"] += 1
+                    report["no_face"].append(rel_path)
+                    print(f"⚠️ NO_FACE   : {rel_path}")
+                return
+            raise
 
-        if not face_locations:
-            with lock:
-                counters["no_face"] += 1
-                report["no_face"].append(rel_path)
-                print(f"⚠️ NO_FACE   : {rel_path}")
-            return
+        with deepface_lock:
+            result = DeepFace.verify(
+                img1_path=str(ref_path),
+                img2_path=str(image_path),
+                model_name="Facenet512",
+                detector_backend="retinaface",
+                enforce_detection=False,
+                silent=True,
+            )
 
-        face_encodings = face_recognition.face_encodings(image, face_locations)
-        face_recognition.compare_faces(
-            [ref_encoding], face_encodings, tolerance=COMPARE_TOLERANCE
-        )
-        distances = face_recognition.face_distance(face_encodings, ref_encoding)
-        min_distance = float(np.min(distances))
+        distance = float(result["distance"])
+        threshold = float(result["threshold"])
+        match_limit = threshold * MATCH_THRESHOLD_FACTOR
+        uncertain_limit = threshold * UNCERTAIN_THRESHOLD_FACTOR
 
-        if min_distance <= MATCH_THRESHOLD:
+        if distance <= match_limit:
             move_image(image_path, src_root, out_dir)
             with lock:
                 counters["matched"] += 1
-                report["matched"].append((rel_path, min_distance))
-                print(f"✅ MATCHED   : {rel_path} (distance: {min_distance:.2f})")
-        elif min_distance <= UNCERTAIN_THRESHOLD:
-            move_image(image_path, src_root, uncertain_dir)
+                report["matched"].append((rel_path, distance))
+                print(f"✅ MATCHED   : {rel_path} (distance: {distance:.2f})")
+        elif distance > match_limit and distance <= uncertain_limit:
+            print(
+                f"DEBUG UNCERTAIN: {image_path} dist={distance:.3f} thresh={threshold:.3f}"
+            )
+            relative_path = image_path.relative_to(src_root)
+            dest_path = uncertain_dir / relative_path
+            os.makedirs(dest_path.parent, exist_ok=True)
+            stat = os.stat(image_path)
+            shutil.move(str(image_path), str(dest_path))
+            os.utime(dest_path, (stat.st_atime, stat.st_mtime))
             with lock:
                 counters["uncertain"] += 1
-                report["uncertain"].append((rel_path, min_distance))
-                print(f"❓ UNCERTAIN : {rel_path} (distance: {min_distance:.2f})")
+                report["uncertain"].append((rel_path, distance))
+                print(f"❓ UNCERTAIN : {rel_path} (distance: {distance:.2f})")
         else:
             with lock:
                 counters["not_matched"] += 1
-                report["not_matched"].append((rel_path, min_distance))
+                report["not_matched"].append((rel_path, distance))
 
     except Exception as exc:
         message = str(exc)
@@ -191,14 +226,17 @@ def write_report(report_path, args, counters, report):
 def main():
     args = parse_args()
 
-    out_dir = Path(args.out)
-    uncertain_dir = Path(args.uncertain)
-    src_root = Path(args.src)
+    out_dir = Path(args.out).resolve()
+    uncertain_dir = Path(args.uncertain).resolve()
+    src_root = Path(args.src).resolve()
+    ref_path = Path(args.ref).resolve()
 
     out_dir.mkdir(parents=True, exist_ok=True)
     uncertain_dir.mkdir(parents=True, exist_ok=True)
 
-    ref_encoding = load_reference_encoding(args.ref)
+    lock = threading.Lock()
+    deepface_lock = threading.Lock()
+    validate_reference_image(ref_path, deepface_lock)
     images = collect_images(src_root)
 
     counters = {
@@ -216,7 +254,6 @@ def main():
         "errors": [],
         "not_matched": [],
     }
-    lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         futures = [
@@ -224,10 +261,11 @@ def main():
                 process_image,
                 image_path,
                 src_root,
-                ref_encoding,
+                ref_path,
                 out_dir,
                 uncertain_dir,
                 lock,
+                deepface_lock,
                 counters,
                 report,
             )
