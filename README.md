@@ -1,27 +1,33 @@
+[English](README.en.md) | فارسی
+
 # FaceOut
 
-Recursively scan a folder of photos, compare detected faces against a reference image, and **move** matched or uncertain files into separate output folders while preserving the original subfolder structure.
+ابزاری برای **فیلتر کردن عکس‌ها بر اساس چهره**. یک پوشه (و زیرپوشه‌هایش) را به‌صورت بازگشتی اسکن می‌کند، چهره‌ها را با عکس(های) مرجع مقایسه می‌کند و فایل‌های تطابق‌یافته یا مشکوک را به پوشه‌های جدا **منتقل** می‌کند — بدون به‌هم‌ریختن ساختار پوشه‌ها.
 
-## Requirements
+## کاربرد
 
-- Python 3.8+
-- System build tools for `dlib` (required by `face_recognition`)
+مثلاً وقتی هزاران عکس از یک رویداد، سفر یا آرشیو شخصی دارید و فقط می‌خواهید عکس‌هایی که **شما** (یا یک نفر مشخص) داخلشان هستید را جدا کنید.
 
-On Ubuntu/Debian:
+## پیش‌نیازها
+
+- Python 3.8 یا بالاتر
+- اتصال اینترنت در **اولین اجرا** (مدل‌های DeepFace دانلود می‌شوند)
+- حدود ۲ تا ۴ گیگابایت فضای دیسک برای مدل‌ها و وابستگی‌ها
+- برای سرعت بهتر: GPU با پشتیبانی CUDA (اختیاری؛ روی CPU هم کار می‌کند)
+
+## نصب
 
 ```bash
-sudo apt install cmake build-essential
-```
-
-## Installation
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Usage
+> اولین بار که اسکریپت اجرا شود، ممکن است چند دقیقه طول بکشد تا مدل‌های یادگیری ماشین دانلود شوند.
+
+## استفاده
+
+### یک عکس مرجع
 
 ```bash
 python face_filter.py \
@@ -32,83 +38,133 @@ python face_filter.py \
   --threads 4
 ```
 
-### Arguments
+### چند عکس مرجع (پیشنهادی)
 
-| Argument | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `--ref` | Yes | — | Path to a reference photo of the target person. Must contain exactly one detectable face. |
-| `--src` | Yes | — | Source folder scanned recursively for images. |
-| `--out` | Yes | — | Destination folder for confident matches. Created if missing. |
-| `--uncertain` | Yes | — | Destination folder for uncertain matches (manual review). Created if missing. |
-| `--threads` | No | `4` | Number of worker threads. |
+برای دقت بهتر، چند عکس واضح از زاویه‌های مختلف همان شخص بدهید:
 
-## Supported formats
+```bash
+python face_filter.py \
+  --ref ./me.jpg ./me2.jpg ./me3.jpg \
+  --src ./photos \
+  --out ./matched \
+  --uncertain ./check_these \
+  --threads 4
+```
 
-The script scans for these extensions (case-insensitive):
+اسکریپت فاصله را با **همه** عکس‌های مرجع محاسبه می‌کند و **کمترین فاصله** (بهترین تطابق) را ملاک قرار می‌دهد.
 
-`.jpg`, `.jpeg`, `.png`, `.webp`, `.heic`
+### آرگومان‌ها
 
-HEIC support is provided via `pillow-heif`.
+| آرگومان | اجباری | پیش‌فرض | توضیح |
+|---------|--------|---------|-------|
+| `--ref` | بله | — | یک یا چند عکس مرجع از شخص هدف. هر کدام باید حداقل یک چهره قابل تشخیص داشته باشد. |
+| `--src` | بله | — | پوشه مبدأ؛ به‌صورت بازگشتی اسکن می‌شود. |
+| `--out` | بله | — | مقصد عکس‌های با تطابق قطعی. در صورت نبود، ساخته می‌شود. |
+| `--uncertain` | بله | — | مقصد عکس‌های مشکوک؛ برای بررسی دستی. |
+| `--threads` | خیر | `4` | تعداد نخ‌های پردازش موازی. |
 
-## How matching works
+## فرمت‌های پشتیبانی‌شده
 
-1. The reference image is loaded and a single face encoding is extracted. If no face is found, the script exits with an error.
-2. Each image under `--src` is processed in parallel.
-3. All faces in the image are detected.
-4. For every detected face, the script computes the face distance to the reference encoding (also using `compare_faces()` with `tolerance=0.5`).
-5. The **closest** face distance in the image determines the result:
+پسوندهای زیر (بدون حساسیت به حروف بزرگ/کوچک) شناسایی می‌شوند:
 
-| Distance | Result | File action |
-|----------|--------|-------------|
-| ≤ 0.45 | **MATCHED** | Moved to `--out` |
-| > 0.45 and ≤ 0.60 | **UNCERTAIN** | Moved to `--uncertain` |
-| > 0.60 | **Not matched** | Left in `--src` |
-| No face detected | **NO_FACE** | Left in `--src` |
-| Read/processing failure | **ERROR** | Left in `--src` |
+`.jpg` · `.jpeg` · `.png` · `.webp` · `.heic`
 
-Moved files keep their relative path from `--src` and their original file timestamps.
+پشتیبانی HEIC از طریق `pillow-heif` است.
 
-## Output
+## نحوه کار
 
-### Live console
+### موتور تشخیص
 
-Each file is logged as it is processed:
+| جزء | مقدار |
+|-----|-------|
+| کتابخانه | [DeepFace](https://github.com/serengil/deepface) |
+| مدل شناسایی چهره | **Facenet512** |
+| تشخیص‌دهنده چهره | **RetinaFace** |
+
+### مراحل پردازش
+
+1. **اعتبارسنجی مرجع** — برای هر عکس `--ref` بررسی می‌شود که چهره‌ای در آن باشد؛ در غیر این صورت اسکریپت با خطا متوقف می‌شود.
+2. **جمع‌آوری فایل‌ها** — همه عکس‌های مجاز زیر `--src` پیدا می‌شوند.
+3. **پردازش موازی** — هر عکس در یک نخ جداگانه بررسی می‌شود.
+4. **تشخیص چهره** — اگر در عکس چهره‌ای نباشد → `NO_FACE`
+5. **محاسبه فاصله** — فاصله embedding چهره عکس با هر مرجع محاسبه و **بهترین** (کمترین) فاصله انتخاب می‌شود.
+6. **دسته‌بندی** — بر اساس آستانه پویا (خروجی مدل) نتیجه تعیین می‌شود.
+
+### قوانین تطابق
+
+آستانه پایه (`threshold`) توسط مدل Facenet512 برای هر جفت عکس محاسبه می‌شود. سپس:
+
+| شرط | نتیجه | عمل روی فایل |
+|-----|-------|---------------|
+| فاصله ≤ `threshold × 1.0` | **MATCHED** — تطابق قطعی | منتقل به `--out` |
+| فاصله بین `threshold × 1.0` و `threshold × 1.4` | **UNCERTAIN** — مشکوک | منتقل به `--uncertain` |
+| فاصله > `threshold × 1.4` | **Not matched** — عدم تطابق | می‌ماند در `--src` |
+| چهره پیدا نشد | **NO_FACE** | می‌ماند در `--src` |
+| خطای خواندن/پردازش | **ERROR** | می‌ماند در `--src` |
+
+فایل‌های منتقل‌شده **مسیر نسبی** خود را از `--src` حفظ می‌کنند و **تاریخ ایجاد/ویرایش** اصلی‌شان دست‌نخورده می‌ماند.
+
+## خروجی
+
+### کنسول (زنده)
 
 ```
 ✅ MATCHED   : photos/2023/birthday.jpg (distance: 0.38)
 ❓ UNCERTAIN : photos/trips/beach.jpg (distance: 0.54)
 ⚠️ NO_FACE   : photos/landscape.jpg
-🔴 ERROR     : photos/corrupt.jpg - [error message]
+🔴 ERROR     : photos/corrupt.jpg - [پیام خطا]
 ```
 
-A `tqdm` progress bar shows overall scan progress.
+نوار پیشرفت `tqdm` وضعیت کلی اسکن را نشان می‌دهد.
 
-### Report file
+### فایل گزارش
 
-After processing, `report.txt` is written to the **current working directory** (not necessarily next to the script). It includes a summary and lists of matched, uncertain, no-face, and error files.
+پس از اتمام، فایل `report.txt` در **پوشه‌ای که از آن دستور را اجرا کرده‌اید** (نه لزوماً کنار اسکریپت) نوشته می‌شود. شامل خلاصه آماری و لیست فایل‌های matched، uncertain، no-face و error است.
 
-## Important notes
+## نکات مهم
 
-- **Files are moved, not copied.** Matched and uncertain images are removed from `--src`. Back up your source folder before running on original photos.
-- Images with no face, no match, or errors stay in `--src` and are only logged.
-- Uncertain matches should be reviewed manually in `--uncertain`.
-- Only the first detected face in the reference image is used if multiple faces are present.
+- **فایل‌ها کپی نمی‌شوند؛ منتقل می‌شوند.** عکس‌های matched و uncertain از `--src` حذف می‌شوند. قبل از اجرا روی عکس‌های اصلی، حتماً **پشتیبان** بگیرید.
+- عکس‌های بدون چهره، بدون تطابق و دارای خطا در `--src` می‌مانند و فقط در گزارش ثبت می‌شوند.
+- پوشه `--uncertain` را **حتماً دستی** بررسی کنید؛ ممکن است عکس شما یا یک نفر شبیه باشد.
+- برای دقت بهتر: عکس‌های مرجع **واضح، روبه‌رو و با نور مناسب** انتخاب کنید.
+- روی CPU حدود **۵ تا ۱۵ ثانیه** برای هر عکس زمان می‌برد؛ با GPU سریع‌تر است.
+- اگر چند چهره در عکس مرجع باشد، RetinaFace همه را می‌بیند؛ مقایسه بر اساس بهترین تطابق با هر مرجع انجام می‌شود.
 
-## Project layout
+## ساختار پروژه
 
 ```
-FaceOut/
-├── face_filter.py      # Main script
-├── requirements.txt    # Python dependencies
-├── report.txt          # Generated after each run (gitignored)
-├── photos/             # Example source folder (gitignored)
-├── matched/            # Example output for matches (gitignored)
-└── check_these/        # Example output for uncertain matches (gitignored)
+faceDetector/
+├── face_filter.py      # اسکریپت اصلی
+├── requirements.txt    # وابستگی‌های Python
+├── README.md           # مستندات فارسی (این فایل)
+├── README.en.md        # مستندات انگلیسی
+├── report.txt          # گزارش هر اجرا (در .gitignore)
+├── photos/             # پوشه نمونه مبدأ (در .gitignore)
+├── matched/            # خروجی تطابق قطعی (در .gitignore)
+└── check_these/        # خروجی موارد مشکوک (در .gitignore)
 ```
 
-## Dependencies
+## وابستگی‌ها
 
-- `face_recognition` — face detection and encoding
-- `tqdm` — progress bar
-- `Pillow` — image loading
-- `pillow-heif` — HEIC/HEIF support
+| پکیج | نقش |
+|------|-----|
+| `deepface` | مقایسه و شناسایی چهره |
+| `retina-face` | تشخیص‌دهنده چهره RetinaFace |
+| `tf-keras` | پشتیبانی از TensorFlow/Keras برای مدل‌ها |
+| `tqdm` | نوار پیشرفت |
+| `Pillow` | بارگذاری تصویر |
+| `pillow-heif` | پشتیبانی HEIC/HEIF |
+
+## عیب‌یابی
+
+| مشکل | راه‌حل احتمالی |
+|------|----------------|
+| `No face found in reference image` | عکس مرجع واضح‌تر و روبه‌رو انتخاب کنید. |
+| اجرای خیلی کند | `--threads` را کم کنید (مصرف RAM کمتر) یا از GPU استفاده کنید. |
+| عکس‌های خودم پیدا نمی‌شوند | چند `--ref` از زاویه‌های مختلف اضافه کنید؛ پوشه `uncertain` را هم چک کنید. |
+| خطای CUDA | بی‌ضرر است اگر GPU ندارید؛ اسکریپت روی CPU ادامه می‌دهد. |
+| عکس HEIC باز نمی‌شود | مطمئن شوید `pillow-heif` نصب است. |
+
+## مجوز و حریم خصوصی
+
+پردازش کاملاً **محلی** روی دستگاه شما انجام می‌شود؛ عکس‌ها به سرور خارجی ارسال نمی‌شوند (به‌جز دانلود یک‌باره مدل‌ها از مخازن DeepFace/TensorFlow).

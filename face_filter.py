@@ -26,7 +26,10 @@ def parse_args():
         description="Filter images by matching faces against a reference photo."
     )
     parser.add_argument(
-        "--ref", required=True, help="Path to reference image of the target person"
+        "--ref",
+        required=True,
+        nargs="+",
+        help="One or more reference images of the target person",
     )
     parser.add_argument(
         "--src", required=True, help="Source folder to scan recursively"
@@ -81,6 +84,35 @@ def validate_reference_image(ref_path, deepface_lock):
         raise
 
 
+def validate_reference_images(ref_paths, deepface_lock):
+    for ref_path in ref_paths:
+        validate_reference_image(ref_path, deepface_lock)
+
+
+def _verify_distance(image_path, ref_path, deepface_lock):
+    with deepface_lock:
+        result = DeepFace.verify(
+            img1_path=str(ref_path),
+            img2_path=str(image_path),
+            model_name="Facenet512",
+            detector_backend="retinaface",
+            enforce_detection=False,
+            silent=True,
+        )
+    return float(result["distance"]), float(result["threshold"])
+
+
+def _best_match_distance(image_path, ref_paths, deepface_lock):
+    best_distance = None
+    best_threshold = None
+    for ref_path in ref_paths:
+        distance, threshold = _verify_distance(image_path, ref_path, deepface_lock)
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_threshold = threshold
+    return best_distance, best_threshold
+
+
 def collect_images(src_dir):
     src_dir = Path(src_dir)
     if not src_dir.is_dir():
@@ -107,7 +139,7 @@ def move_image(image_path, src_root, dest_root):
 def process_image(
     image_path,
     src_root,
-    ref_path,
+    ref_paths,
     out_dir,
     uncertain_dir,
     lock,
@@ -129,18 +161,9 @@ def process_image(
                 return
             raise
 
-        with deepface_lock:
-            result = DeepFace.verify(
-                img1_path=str(ref_path),
-                img2_path=str(image_path),
-                model_name="Facenet512",
-                detector_backend="retinaface",
-                enforce_detection=False,
-                silent=True,
-            )
-
-        distance = float(result["distance"])
-        threshold = float(result["threshold"])
+        distance, threshold = _best_match_distance(
+            image_path, ref_paths, deepface_lock
+        )
         match_limit = threshold * MATCH_THRESHOLD_FACTOR
         uncertain_limit = threshold * UNCERTAIN_THRESHOLD_FACTOR
 
@@ -181,20 +204,26 @@ def write_report(report_path, args, counters, report):
     lines = [
         "========== FACE FILTER REPORT ==========",
         f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"Reference image: {Path(args.ref).resolve()}",
-        f"Source folder: {Path(args.src).resolve()}",
-        "",
-        "SUMMARY:",
-        f"  Total images scanned : {counters['total']}",
-        f"  Matched (moved)      : {counters['matched']}",
-        f"  Uncertain (moved)    : {counters['uncertain']}",
-        f"  No face detected     : {counters['no_face']}",
-        f"  Errors               : {counters['errors']}",
-        f"  Not matched          : {counters['not_matched']}",
-        "",
-        "----------------------------------------",
-        "✅ MATCHED FILES:",
+        f"Reference images ({len(args.ref)}):",
     ]
+    for ref_path in args.ref:
+        lines.append(f"  - {Path(ref_path).resolve()}")
+    lines.extend(
+        [
+            f"Source folder: {Path(args.src).resolve()}",
+            "",
+            "SUMMARY:",
+            f"  Total images scanned : {counters['total']}",
+            f"  Matched (moved)      : {counters['matched']}",
+            f"  Uncertain (moved)    : {counters['uncertain']}",
+            f"  No face detected     : {counters['no_face']}",
+            f"  Errors               : {counters['errors']}",
+            f"  Not matched          : {counters['not_matched']}",
+            "",
+            "----------------------------------------",
+            "✅ MATCHED FILES:",
+        ]
+    )
 
     for rel_path, distance in report["matched"]:
         lines.append(f"  {rel_path} (distance: {distance:.2f})")
@@ -229,14 +258,14 @@ def main():
     out_dir = Path(args.out).resolve()
     uncertain_dir = Path(args.uncertain).resolve()
     src_root = Path(args.src).resolve()
-    ref_path = Path(args.ref).resolve()
+    ref_paths = [Path(ref_path).resolve() for ref_path in args.ref]
 
     out_dir.mkdir(parents=True, exist_ok=True)
     uncertain_dir.mkdir(parents=True, exist_ok=True)
 
     lock = threading.Lock()
     deepface_lock = threading.Lock()
-    validate_reference_image(ref_path, deepface_lock)
+    validate_reference_images(ref_paths, deepface_lock)
     images = collect_images(src_root)
 
     counters = {
@@ -261,7 +290,7 @@ def main():
                 process_image,
                 image_path,
                 src_root,
-                ref_path,
+                ref_paths,
                 out_dir,
                 uncertain_dir,
                 lock,
